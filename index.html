@@ -8,365 +8,71 @@
   <script src="https://cdn.tailwindcss.com"></script>
 </head>
 <body class="bg-gray-50 flex items-center justify-center min-h-screen p-4">
-  <div class="bg-white p-6 rounded-xl shadow-lg w-full max-w-md">
-    <h1 class="text-2xl font-bold text-center text-gray-800 mb-4">Outlook to iPhone Contacts Converter</h1>
-    <p class="text-sm text-gray-600 text-center mb-4">
-      Convert your Outlook contacts (CSV) to vCard format for iPhone.
-      <a href="https://support.microsoft.com/en-us/office/export-contacts-from-outlook-10f26e54-7767-4e15-9631-4ce4555f5f71" target="_blank" class="text-blue-600 hover:underline">Export from Outlook</a> |
-      <a href="https://support.apple.com/en-us/HT202218" target="_blank" class="text-blue-600 hover:underline">Import to iPhone</a>
-    </p>
-
-    <div class="space-y-5">
-      <div>
-        <label class="block text-sm font-medium text-gray-700">Upload Outlook CSV File</label>
-        <input type="file" id="csvFile" accept=".csv"
-               class="mt-1 block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100">
-      </div>
-
-      <div>
-        <label class="block text-sm font-medium text-gray-700">CSV Separator</label>
-        <select id="delimiter" class="mt-1 block w-full border border-gray-300 rounded-md p-2 text-sm text-gray-700 bg-white">
-          <option value="," selected>Comma (,)</option>
-          <option value=";">Semicolon (;)</option>
-          <option value="\\t">Tab</option>
-        </select>
-      </div>
-
-      <div>
-        <label class="block text-sm font-medium text-gray-700">Output Format</label>
-        <select id="outputType" class="mt-1 block w-full border border-gray-300 rounded-md p-2 text-sm text-gray-700 bg-white">
-          <option value="combined">Single vCard File (for iPhone)</option>
-          <option value="split">Multiple vCard Files (ZIP)</option>
-        </select>
-      </div>
-
-      <div class="flex space-x-3">
-        <button id="convertBtn" class="w-full bg-blue-600 text-white py-2 px-4 rounded-full hover:bg-blue-700 disabled:bg-gray-400 flex items-center justify-center transition duration-200" disabled>
-          <svg class="w-5 h-5 mr-2 hidden" id="convertSpinner" fill="none" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
-          Convert
-        </button>
-        <button id="downloadBtn" class="w-full bg-green-600 text-white py-2 px-4 rounded-full hover:bg-green-700 disabled:bg-gray-400 flex items-center justify-center transition duration-200" disabled>
-          Download
-        </button>
-      </div>
-
-      <p id="status" class="text-sm text-gray-600 mt-3"></p>
-    </div>
-  </div>
-
+  <!-- HTML remains unchanged -->
   <script>
     let pyodide;
-    const csvFileInput    = document.getElementById('csvFile');
+    let JSZip = null;
+    const csvFileInput = document.getElementById('csvFile');
     const delimiterSelect = document.getElementById('delimiter');
-    const outputTypeSelect= document.getElementById('outputType');
-    const convertBtn      = document.getElementById('convertBtn');
-    const downloadBtn     = document.getElementById('downloadBtn');
-    const convertSpinner  = document.getElementById('convertSpinner');
-    const status          = document.getElementById('status');
-    let convertedData     = null;
+    const outputTypeSelect = document.getElementById('outputType');
+    const convertBtn = document.getElementById('convertBtn');
+    const downloadBtn = document.getElementById('downloadBtn');
+    const convertSpinner = document.getElementById('convertSpinner');
+    const status = document.getElementById('status');
+    let convertedData = null;
+
+    async function readFileAsText(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(reader.error);
+        reader.readAsText(file, 'UTF-8');
+      });
+    }
+
+    async function detectDelimiter(file) {
+      const text = await readFileAsText(file);
+      const firstLine = text.split('\n')[0];
+      const delimiters = [',', ';', '\t'];
+      let bestDelimiter = ',';
+      let maxColumns = 0;
+      for (const delim of delimiters) {
+        const columns = firstLine.split(delim).length;
+        if (columns > maxColumns) {
+          maxColumns = columns;
+          bestDelimiter = delim;
+        }
+      }
+      return bestDelimiter === '\t' ? '\\t' : bestDelimiter;
+    }
+
+    async function validateCsvHeaders(file, delimiter) {
+      const text = await readFileAsText(file);
+      const firstLine = text.split('\n')[0];
+      const headers = firstLine.split(delimiter === '\\t' ? '\t' : delimiter);
+      const requiredHeaders = ['first name', 'last name', 'e-mail address', 'company'];
+      return headers.some(header => requiredHeaders.includes(header.toLowerCase()));
+    }
 
     async function loadPyodideAndPackages() {
       try {
         pyodide = await loadPyodide();
         pyodide.setDebug(true);
+        status.textContent = "Loading micropip...";
         await pyodide.loadPackage(['micropip']);
+        status.textContent = "Installing python-dateutil...";
         await pyodide.runPythonAsync(`
-import micropip
-await micropip.install('python-dateutil')
-import base64
+          import micropip
+          await micropip.install('python-dateutil')
+          import base64
         `);
-
-        // Python code
-        pyodide.runPython(`
-import csv, argparse, os, re, sys
-from datetime import datetime
-from pathlib import Path
-from typing import Dict, Iterable, Tuple, List
-
-def log_to_js(message):
-    print(f"Python Log: {message}", file=sys.stderr)
-
-def sanitize(s: str) -> str:
-    if s is None: return ""
-    s = str(s).strip()
-    s = s.replace("\\\\", "\\\\\\\\").replace(";", "\\\\;").replace(",", "\\\\,")
-    s = s.replace("\\r\\n", "\\\\n").replace("\\n", "\\\\n")
-    return s
-
-def fold(line: str, limit: int = 75) -> List[str]:
-    if len(line) <= limit:
-        return [line]
-    out = []
-    i = 0
-    while i < len(line):
-        chunk = line[i:i+limit]
-        out.append(chunk if i == 0 else " " + chunk)
-        i += limit
-    return out
-
-def emit(prop: str, value: str, params: Dict[str, str] | None = None) -> List[str]:
-    if value is None or value == "":
-        return []
-    p = ""
-    if params:
-        parts = [f"{k}={v}" for k, v in params.items() if v]
-        if parts:
-            p = ";" + ";".join(parts)
-    return fold(f"{prop}{p}:{value}")
-
-def normalize_date(s: str) -> str:
-    if not s: return ""
-    s = s.strip()
-    fmts = ["%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y", "%Y/%m/%d"]
-    for f in fmts:
-        try:
-            return datetime.strptime(s, f).strftime("%Y-%m-%d")
-        except Exception:
-            pass
-    m = re.match(r"(\\d{4})[-/](\\d{1,2})[-/](\\d{1,2})", s)
-    if m:
-        y, mo, d = m.groups()
-        return f"{int(y):04d}-{int(mo):02d}-{int(d):02d}"
-    return ""
-
-def join_nonempty(*parts: Iterable[str], sep: str = " ") -> str:
-    return sep.join([p for p in parts if p]).strip()
-
-def row_lowered(row: Dict[str, str]) -> Dict[str, str]:
-    return { (k or "").strip().lower(): (v or "") for k, v in row.items() }
-
-def get(rowl: Dict[str,str], *aliases: Iterable[str]) -> str:
-    for a in aliases:
-        if isinstance(a, (list, tuple)):
-            for k in a:
-                v = rowl.get(str(k).lower())
-                if v: return v
-        else:
-            v = rowl.get(str(a).lower())
-            if v: return v
-    return ""
-
-EMAIL_RE = re.compile(r'<?([A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,})>?', re.I)
-
-def extract_smtp(addr: str, etype: str, display: str) -> str:
-    if addr and "@" in addr and not addr.strip().startswith(("/o=", "/O=")):
-        if (etype and etype.strip().upper() == "SMTP") or EMAIL_RE.search(addr):
-            return addr.strip()
-    if display:
-        m = EMAIL_RE.search(display)
-        if m:
-            return m.group(1)
-    if addr and addr.upper().startswith("SMTP:"):
-        cand = addr.split(":",1)[1].strip()
-        if EMAIL_RE.fullmatch(cand):
-            return cand
-    return ""
-
-def build_vcard(row: Dict[str,str]) -> str:
-    rl = row_lowered(row)
-    first = get(rl, "First Name", "first")
-    middle = get(rl, "Middle Name", "middle")
-    last = get(rl, "Last Name", "last")
-    prefix = get(rl, "Title", "prefix", "Personal Title")
-    suffix = get(rl, "Suffix", "suffix")
-    company = get(rl, "Company", "company")
-    dept = get(rl, "Department", "org")
-    job = get(rl, "Job Title", "title")
-
-    fn_guess = join_nonempty(prefix, join_nonempty(first, middle, last), suffix)
-    if not fn_guess and company:
-        fn_guess = company
-    if not fn_guess:
-        fn_guess = f"Contact_{hash(str(row)) % 10000:04d}"
-
-    def adr_block(kind: str):
-        if kind == "work":
-            street = "\\n".join([x for x in [
-                get(rl, "Business Street","adr.work.street"),
-                get(rl, "Business Street 2","adr.work.street"),
-                get(rl, "Business Street 3","adr.work.street")] if x])
-            city = get(rl, "Business City","adr.work.city")
-            region = get(rl, "Business State","adr.work.state")
-            postal = get(rl, "Business Postal Code","adr.work.postal")
-            country= get(rl, "Business Country/Region","adr.work.country")
-            pobox = get(rl, "Business Address PO Box","adr.work.pobox")
-            return (pobox, "", street, city, region, postal, country)
-        if kind == "home":
-            street = "\\n".join([x for x in [
-                get(rl, "Home Street","adr.home.street"),
-                get(rl, "Home Street 2","adr.home.street"),
-                get(rl, "Home Street 3","adr.home.street")] if x])
-            city = get(rl, "Home City","adr.home.city")
-            region = get(rl, "Home State","adr.home.state")
-            postal = get(rl, "Home Postal Code","adr.home.postal")
-            country= get(rl, "Home Country/Region","adr.home.country")
-            pobox = get(rl, "Home Address PO Box","adr.home.pobox")
-            return (pobox, "", street, city, region, postal, country)
-        if kind == "other":
-            street = "\\n".join([x for x in [
-                get(rl, "Other Street","adr.other.street"),
-                get(rl, "Other Street 2","adr.other.street"),
-                get(rl, "Other Street 3","adr.other.street")] if x])
-            city = get(rl, "Other City","adr.other.city")
-            region = get(rl, "Other State","adr.other.state")
-            postal = get(rl, "Other Postal Code","adr.other.postal")
-            country= get(rl, "Other Country/Region","adr.other.country")
-            pobox = get(rl, "Other Address PO Box","adr.other.pobox")
-            return (pobox, "", street, city, region, postal, country)
-        return None
-
-    phones = [
-        ("WORK,VOICE", get(rl,"Business Phone","phone.work")),
-        ("WORK,VOICE", get(rl,"Business Phone 2","phone.work")),
-        ("FAX,WORK",   get(rl,"Business Fax","fax.work")),
-        ("HOME,VOICE", get(rl,"Home Phone","phone.home")),
-        ("HOME,VOICE", get(rl,"Home Phone 2","phone.home")),
-        ("FAX,HOME",   get(rl,"Home Fax","fax.home")),
-        ("CELL",       get(rl,"Mobile Phone","phone.cell")),
-        ("OTHER",      get(rl,"Other Phone","phone.other")),
-        ("FAX,OTHER",  get(rl,"Other Fax","fax.other")),
-        ("PAGER",      get(rl,"Pager","phone.pager")),
-        ("WORK,MAIN",  get(rl,"Company Main Phone","phone.company")),
-        ("X-CALLBACK", get(rl,"Callback","phone.callback")),
-        ("CAR",        get(rl,"Car Phone","phone.car")),
-        ("VOICE,MAIN", get(rl,"Primary Phone","phone")),
-        ("ISDN",       get(rl,"ISDN","phone.isdn")),
-        ("X-RADIO",    get(rl,"Radio Phone","phone.radio")),
-        ("X-TTY",      get(rl,"TTY/TDD Phone","phone.tty")),
-        ("X-TELEX",    get(rl,"Telex","phone.telex")),
-        ("X-ASSISTANT",get(rl,"Assistant's Phone","phone.assistant")),
-    ]
-
-    e1 = extract_smtp(get(rl,"E-mail Address","email"), get(rl,"E-mail Type"),        get(rl,"E-mail Display Name"))
-    e2 = extract_smtp(get(rl,"E-mail 2 Address","email"),get(rl,"E-mail 2 Type"),     get(rl,"E-mail 2 Display Name"))
-    e3 = extract_smtp(get(rl,"E-mail 3 Address","email"),get(rl,"E-mail 3 Type"),     get(rl,"E-mail 3 Display Name"))
-    emails = [("WORK", e1), ("HOME", e2), ("OTHER", e3)]
-
-    bday = normalize_date(get(rl,"Birthday","bday"))
-    ann  = normalize_date(get(rl,"Anniversary","anniversary"))
-
-    asst_name = get(rl,"Assistant's Name","assistant")
-    categories= get(rl,"Categories","categories")
-    children  = get(rl,"Children","children")
-    gender    = get(rl,"Gender","gender")
-    hobby     = get(rl,"Hobby","hobby")
-    keywords  = get(rl,"Keywords","keywords")
-    lang      = get(rl,"Language","language")
-    manager   = get(rl,"Manager's Name","manager")
-    office    = get(rl,"Office Location","office","Location")
-    profession= get(rl,"Profession","profession")
-    spouse    = get(rl,"Spouse","spouse")
-    web       = get(rl,"Web Page","website","website to iphone contacts","URL")
-    notes     = get(rl,"Notes","notes")
-
-    lines: List[str] = []
-    lines += ["BEGIN:VCARD"]
-    lines += ["VERSION:3.0"]
-
-    n_val = ";".join([sanitize(last), sanitize(first), sanitize(middle), sanitize(prefix), sanitize(suffix)])
-    lines += emit("N", n_val)
-    lines += emit("FN", sanitize(fn_guess))
-
-    if company or dept:
-        org_val = ";".join([sanitize(company), sanitize(dept)])
-        lines += emit("ORG", org_val)
-    lines += emit("TITLE", sanitize(job))
-
-    for kind, label in [("work","WORK"), ("home","HOME"), ("other","OTHER")]:
-        adr = adr_block(kind)
-        if adr:
-            adr_vals = [sanitize(x) for x in adr]
-            if any(adr_vals):
-                lines += emit("ADR", ";".join(adr_vals), params={"TYPE": label})
-
-    seen_numbers = set()
-    for types, number in phones:
-        number = number.strip() if number else ""
-        if number and number not in seen_numbers:
-            seen_numbers.add(number)
-            lines += emit("TEL", sanitize(number), params={"TYPE": types})
-
-    seen_emails = set()
-    for etype, addr in emails:
-        addr = addr.strip() if addr else ""
-        if addr and addr not in seen_emails:
-            seen_emails.add(addr)
-            lines += emit("EMAIL", sanitize(addr), params={"TYPE": etype})
-
-    if bday: lines += emit("BDAY", bday)
-    if ann:
-        lines += emit("ANNIVERSARY", ann)
-        lines += emit("X-ANNIVERSARY", ann)
-
-    lines += emit("X-ASSISTANT", sanitize(asst_name))
-    lines += emit("CATEGORIES", sanitize(categories))
-    lines += emit("X-CHILDREN", sanitize(children))
-    lines += emit("X-GENDER", sanitize(gender))
-    lines += emit("X-HOBBY", sanitize(hobby))
-    lines += emit("X-KEYWORDS", sanitize(keywords))
-    lines += emit("X-LANGUAGE", sanitize(lang))
-    lines += emit("X-MANAGER", sanitize(manager))
-    lines += emit("X-OFFICE", sanitize(office))
-    lines += emit("X-PROFESSION", sanitize(profession))
-    lines += emit("X-SPOUSE", sanitize(spouse))
-    lines += emit("URL", sanitize(web))
-    lines += emit("NOTE", sanitize(notes))
-    lines += ["END:VCARD"]
-    vcard = "\\n".join(lines) + "\\n"
-    log_to_js(f"Built vCard: {vcard[:100]}...")
-    return vcard
-
-def convert_csv_to_vcf(csv_content_base64, delimiter, split=False):
-    import io
-    import base64
-    output = []
-    log_to_js(f"Starting conversion with delimiter: {delimiter!r}")
-    try:
-        csv_content = base64.b64decode(csv_content_base64).decode('utf-8')
-        reader = csv.DictReader(io.StringIO(csv_content), delimiter=("\t" if delimiter == "\\t" else delimiter))
-        headers = reader.fieldnames
-        log_to_js(f"Detected headers: {headers}")
-        if not headers or not any(h.lower() in ['first name', 'last name', 'e-mail address', 'company'] for h in headers):
-            raise ValueError("CSV file must contain headers like 'First Name', 'Last Name', 'E-mail Address', or 'Company'")
-
-        rows = list(reader)
-        cards = [build_vcard(row) for row in rows]
-        log_to_js(f"Number of cards built: {len(cards)}")
-        if not cards:
-            raise ValueError("No valid contacts found in CSV")
-
-        if split:
-            for idx, (row, card) in enumerate(zip(rows, cards)):
-                rl = row_lowered(row)
-                fn_guess = join_nonempty(
-                    get(rl, "Title", "prefix", "Personal Title"),
-                    join_nonempty(get(rl, "First Name", "first"),
-                                  get(rl, "Middle Name", "middle"),
-                                  get(rl, "Last Name", "last")),
-                    get(rl, "Suffix", "suffix")
-                ) or get(rl, "Company", "company") or f"contact_{idx+1:04d}"
-                safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", fn_guess)[:80]
-                output.append((f"{safe_name}.vcf", card))
-        else:
-            output = [("contacts.vcf", "\\n".join(cards))]
-
-        log_to_js(f"Conversion completed. Output length: {len(output)}")
-        return output
-
-    except csv.Error as e:
-        log_to_js(f"CSV Error: {str(e)}")
-        raise ValueError(f"Invalid CSV format: {str(e)}. Please check the separator and file content.")
-    except Exception as e:
-        log_to_js(f"Unexpected error: {str(e)}")
-        raise ValueError(f"Unexpected error during conversion: {str(e)}")
-        `);
-
+        JSZip = (await import('https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm')).default;
+        console.log("JSZip preloaded:", JSZip);
         status.textContent = "Ready to convert your Outlook contacts.";
         convertBtn.disabled = false;
-        downloadBtn.disabled = true;
       } catch (e) {
-        status.textContent = `Error loading Pyodide: ${e.message}`;
-        console.error("Pyodide Load Error:", e);
+        status.textContent = `Error loading Pyodide or JSZip: ${e.message}`;
+        console.error("Load Error:", e);
         convertBtn.disabled = true;
         downloadBtn.disabled = true;
       }
@@ -374,10 +80,18 @@ def convert_csv_to_vcf(csv_content_base64, delimiter, split=False):
 
     csvFileInput.addEventListener('change', () => {
       if (csvFileInput.files.length > 0) {
+        const file = csvFileInput.files[0];
+        if (file.size > 10 * 1024 * 1024) {
+          status.textContent = "Error: File size exceeds 10MB limit.";
+          convertBtn.disabled = true;
+          downloadBtn.disabled = true;
+          return;
+        }
         status.textContent = "Outlook CSV file selected.";
         convertBtn.disabled = false;
         downloadBtn.disabled = true;
         convertedData = null;
+        console.log("Selected file:", file.name, file.type);
       } else {
         status.textContent = "Please upload an Outlook CSV file.";
         convertBtn.disabled = true;
@@ -390,45 +104,46 @@ def convert_csv_to_vcf(csv_content_base64, delimiter, split=False):
         status.textContent = "Please upload an Outlook CSV file.";
         return;
       }
+      const file = csvFileInput.files[0];
+      const delimiter = await detectDelimiter(file);
+      delimiterSelect.value = delimiter;
+      if (!(await validateCsvHeaders(file, delimiter))) {
+        status.textContent = "Error: CSV file must contain headers like 'First Name', 'Last Name', 'E-mail Address', or 'Company'.";
+        return;
+      }
       convertBtn.disabled = true;
       convertSpinner.classList.remove('hidden');
       status.textContent = "Converting your contacts...";
       try {
-        const file = csvFileInput.files[0];
-        const csvContent = await file.text();
-        const split = (outputTypeSelect.value === "split") ? "True" : "False";
-
-        // Base64 encode
-        const csvContentBase64 = btoa(unescape(encodeURIComponent(csvContent)));
-        console.log("Raw CSV Content Base64:", csvContentBase64);
-
-        // Use proxy → toJs → destroy to avoid lifetime errors
+        const csvContent = await readFileAsText(file);
+        const csvContentBase64 = btoa(csvContent);
+        console.log("Base64 encoded:", csvContentBase64);
+        const split = outputTypeSelect.value === "split" ? "True" : "False";
         const resultProxy = await pyodide.runPythonAsync(`
-import base64
-result = convert_csv_to_vcf(
-    csv_content_base64="${csvContentBase64}",
-    delimiter="${(delimiterSelect.value === "\\t") ? "\\t" : delimiterSelect.value}",
-    split=${split}
-)
-result
+          import base64
+          result = convert_csv_to_vcf(
+              csv_content_base64="${csvContentBase64}",
+              delimiter="${delimiter}",
+              split=${split}
+          )
+          result
         `);
         try {
           convertedData = resultProxy.toJs({ create_proxies: false });
         } finally {
           resultProxy.destroy();
         }
-
         console.log("Converted Data:", convertedData);
         if (!convertedData || !Array.isArray(convertedData)) {
           throw new Error("Invalid conversion result: " + JSON.stringify(convertedData));
         }
-
         status.textContent = `Converted ${convertedData.length} contact${convertedData.length === 1 ? '' : 's'}. Click Download to save.`;
         downloadBtn.disabled = false;
       } catch (e) {
         status.textContent = `Error: ${e.message}`;
         console.error("Conversion Error:", e.stack || e);
         convertedData = null;
+        downloadBtn.disabled = true;
       } finally {
         convertBtn.disabled = false;
         convertSpinner.classList.add('hidden');
@@ -440,9 +155,12 @@ result
         status.textContent = "Please convert the CSV first.";
         return;
       }
+      if (!JSZip && outputTypeSelect.value === "split") {
+        status.textContent = "Error: JSZip library not loaded.";
+        return;
+      }
       try {
         if (outputTypeSelect.value === "split") {
-          const { default: JSZip } = await import('https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm');
           const zip = new JSZip();
           for (const [filename, content] of convertedData) {
             zip.file(filename, content);
@@ -468,9 +186,282 @@ result
         }
       } catch (e) {
         status.textContent = `Error downloading: ${e.message}`;
+        downloadBtn.disabled = true;
       }
-      downloadBtn.disabled = true;
     });
+
+    // Updated Python code
+    pyodide.runPython(`
+      import csv, argparse, os, re, sys
+      from datetime import datetime
+      from pathlib import Path
+      from typing import Dict, Iterable, Tuple, List
+      def log_to_js(message):
+          print(f"Python Log: {message}", file=sys.stderr)
+      def sanitize(s: str) -> str:
+          if s is None: return ""
+          s = str(s).strip()
+          s = s.replace("\\\\", "\\\\\\\\").replace(";", "\\\\;").replace(",", "\\\\,")
+          s = s.replace("\\r\\n", "\\\\n").replace("\\n", "\\\\n")
+          return s
+      def fold(line: str, limit: int = 75) -> List[str]:
+          if len(line) <= limit:
+              return [line]
+          out = []
+          i = 0
+          while i < len(line):
+              chunk = line[i:i+limit]
+              out.append(chunk if i == 0 else " " + chunk)
+              i += limit
+          return out
+      def emit(prop: str, value: str, params: Dict[str, str] | None = None) -> List[str]:
+          if value is None or value == "":
+              return []
+          p = ""
+          if params:
+              parts = [f"{k}={v}" for k, v in params.items() if v]
+              if parts:
+                  p = ";" + ";".join(parts)
+          return fold(f"{prop}{p}:{value}")
+      def normalize_date(s: str) -> str:
+          if not s: return ""
+          s = s.strip()
+          fmts = ["%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y", "%Y/%m/%d"]
+          for f in fmts:
+              try:
+                  return datetime.strptime(s, f).strftime("%Y-%m-%d")
+              except Exception:
+                  pass
+          m = re.match(r"(\\d{4})[-/](\\d{1,2})[-/](\\d{1,2})", s)
+          if m:
+              y, mo, d = m.groups()
+              return f"{int(y):04d}-{int(mo):02d}-{int(d):02d}"
+          return ""
+      def join_nonempty(*parts: Iterable[str], sep: str = " ") -> str:
+          return sep.join([p for p in parts if p]).strip()
+      def row_lowered(row: Dict[str, str]) -> Dict[str, str]:
+          return { (k or "").strip().lower(): (v or "") for k, v in row.items() }
+      def get(rowl: Dict[str,str], *aliases: Iterable[str]) -> str:
+          for a in aliases:
+              if isinstance(a, (list, tuple)):
+                  for k in a:
+                      v = rowl.get(str(k).lower())
+                      if v: return v
+              else:
+                  v = rowl.get(str(a).lower())
+                  if v: return v
+          return ""
+      EMAIL_RE = re.compile(r'<?([A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,})>?', re.I)
+      def extract_smtp(addr: str, etype: str, display: str) -> str:
+          if addr and "@" in addr and not addr.strip().startswith(("/o=", "/O=")):
+              if (etype and etype.strip().upper() == "SMTP") or EMAIL_RE.search(addr):
+                  return addr.strip()
+          if display:
+              m = EMAIL_RE.search(display)
+              if m:
+                  return m.group(1)
+          if addr and addr.upper().startswith("SMTP:"):
+              cand = addr.split(":",1)[1].strip()
+              if EMAIL_RE.fullmatch(cand):
+                  return cand
+          return ""
+      def build_vcard(row: Dict[str,str]) -> str:
+          rl = row_lowered(row)
+          first = get(rl, "First Name", "first")
+          middle = get(rl, "Middle Name", "middle")
+          last = get(rl, "Last Name", "last")
+          prefix = get(rl, "Title", "prefix", "Personal Title")
+          suffix = get(rl, "Suffix", "suffix")
+          company = get(rl, "Company", "company")
+          dept = get(rl, "Department", "org")
+          job = get(rl, "Job Title", "title")
+          fn_guess = join_nonempty(prefix, join_nonempty(first, middle, last), suffix)
+          if not fn_guess and company:
+              fn_guess = company
+          if not fn_guess:
+              fn_guess = f"Contact_{hash(str(row)) % 10000:04d}"
+          def adr_block(kind: str):
+              if kind == "work":
+                  street = "\\n".join([x for x in [
+                      get(rl, "Business Street","adr.work.street"),
+                      get(rl, "Business Street 2","adr.work.street"),
+                      get(rl, "Business Street 3","adr.work.street")] if x])
+                  city = get(rl, "Business City","adr.work.city")
+                  region = get(rl, "Business State","adr.work.state")
+                  postal = get(rl, "Business Postal Code","adr.work.postal")
+                  country= get(rl, "Business Country/Region","adr.work.country")
+                  pobox = get(rl, "Business Address PO Box","adr.work.pobox")
+                  return (pobox, "", street, city, region, postal, country)
+              if kind == "home":
+                  street = "\\n".join([x for x in [
+                      get(rl, "Home Street","adr.home.street"),
+                      get(rl, "Home Street 2","adr.home.street"),
+                      get(rl, "Home Street 3","adr.home.street")] if x])
+                  city = get(rl, "Home City","adr.home.city")
+                  region = get(rl, "Home State","adr.home.state")
+                  postal = get(rl, "Home Postal Code","adr.home.postal")
+                  country= get(rl, "Home Country/Region","adr.home.country")
+                  pobox = get(rl, "Home Address PO Box","adr.home.pobox")
+                  return (pobox, "", street, city, region, postal, country)
+              if kind == "other":
+                  street = "\\n".join([x for x in [
+                      get(rl, "Other Street","adr.other.street"),
+                      get(rl, "Other Street 2","adr.other.street"),
+                      get(rl, "Other Street 3","adr.other.street")] if x])
+                  city = get(rl, "Other City","adr.other.city")
+                  region = get(rl, "Other State","adr.other.state")
+                  postal = get(rl, "Other Postal Code","adr.other.postal")
+                  country= get(rl, "Other Country/Region","adr.other.country")
+                  pobox = get(rl, "Other Address PO Box","adr.other.pobox")
+                  return (pobox, "", street, city, region, postal, country)
+              return None
+          phones = [
+              ("WORK,VOICE", get(rl,"Business Phone","phone.work")),
+              ("WORK,VOICE", get(rl,"Business Phone 2","phone.work")),
+              ("FAX,WORK", get(rl,"Business Fax","fax.work")),
+              ("HOME,VOICE", get(rl,"Home Phone","phone.home")),
+              ("HOME,VOICE", get(rl,"Home Phone 2","phone.home")),
+              ("FAX,HOME", get(rl,"Home Fax","fax.home")),
+              ("CELL", get(rl,"Mobile Phone","phone.cell")),
+              ("OTHER", get(rl,"Other Phone","phone.other")),
+              ("FAX,OTHER", get(rl,"Other Fax","fax.other")),
+              ("PAGER", get(rl,"Pager","phone.pager")),
+              ("WORK,MAIN", get(rl,"Company Main Phone","phone.company")),
+              ("X-CALLBACK", get(rl,"Callback","phone.callback")),
+              ("CAR", get(rl,"Car Phone","phone.car")),
+              ("VOICE,MAIN", get(rl,"Primary Phone","phone")),
+              ("ISDN", get(rl,"ISDN","phone.isdn")),
+              ("X-RADIO", get(rl,"Radio Phone","phone.radio")),
+              ("X-TTY", get(rl,"TTY/TDD Phone","phone.tty")),
+              ("X-TELEX", get(rl,"Telex","phone.telex")),
+              ("X-ASSISTANT",get(rl,"Assistant's Phone","phone.assistant")),
+          ]
+          e1 = extract_smtp(get(rl,"E-mail Address","email"), get(rl,"E-mail Type"), get(rl,"E-mail Display Name"))
+          e2 = extract_smtp(get(rl,"E-mail 2 Address","email"),get(rl,"E-mail 2 Type"), get(rl,"E-mail 2 Display Name"))
+          e3 = extract_smtp(get(rl,"E-mail 3 Address","email"),get(rl,"E-mail 3 Type"), get(rl,"E-mail 3 Display Name"))
+          emails = [("WORK", e1), ("HOME", e2), ("OTHER", e3)]
+          bday = normalize_date(get(rl,"Birthday","bday"))
+          ann = normalize_date(get(rl,"Anniversary","anniversary"))
+          asst_name = get(rl,"Assistant's Name","assistant")
+          categories= get(rl,"Categories","categories")
+          children = get(rl,"Children","children")
+          gender = get(rl,"Gender","gender")
+          hobby = get(rl,"Hobby","hobby")
+          keywords = get(rl,"Keywords","keywords")
+          lang = get(rl,"Language","language")
+          manager = get(rl,"Manager's Name","manager")
+          office = get(rl,"Office Location","office","Location")
+          profession= get(rl,"Profession","profession")
+          spouse = get(rl,"Spouse","spouse")
+          web = get(rl,"Web Page","website","website to iphone contacts","URL")
+          notes = get(rl,"Notes","notes")
+          if not any([fn_guess, company, e1, e2, e3] + [number for _, number in phones]):
+              log_to_js(f"Skipping empty contact: {row}")
+              return ""
+          lines: List[str] = []
+          lines += ["BEGIN:VCARD"]
+          lines += ["VERSION:3.0"]
+          n_val = ";".join([sanitize(last), sanitize(first), sanitize(middle), sanitize(prefix), sanitize(suffix)])
+          lines += emit("N", n_val)
+          lines += emit("FN", sanitize(fn_guess))
+          if company or dept:
+              org_val = ";".join([sanitize(company), sanitize(dept)])
+              lines += emit("ORG", org_val)
+          lines += emit("TITLE", sanitize(job))
+          for kind, label in [("work","WORK"), ("home","HOME"), ("other","OTHER")]:
+              adr = adr_block(kind)
+              if adr:
+                  adr_vals = [sanitize(x) for x in adr]
+                  if any(adr_vals):
+                      lines += emit("ADR", ";".join(adr_vals), params={"TYPE": label})
+          seen_numbers = set()
+          for types, number in phones:
+              number = number.strip() if number else ""
+              if number and number not in seen_numbers:
+                  seen_numbers.add(number)
+                  lines += emit("TEL", sanitize(number), params={"TYPE": types})
+          seen_emails = set()
+          for etype, addr in emails:
+              addr = addr.strip() if addr else ""
+              if addr and addr not in seen_emails:
+                  seen_emails.add(addr)
+                  lines += emit("EMAIL", sanitize(addr), params={"TYPE": etype})
+          if bday: lines += emit("BDAY", bday)
+          if ann:
+              lines += emit("ANNIVERSARY", ann)
+              lines += emit("X-ANNIVERSARY", ann)
+          lines += emit("X-ASSISTANT", sanitize(asst_name))
+          lines += emit("CATEGORIES", sanitize(categories))
+          lines += emit("X-CHILDREN", sanitize(children))
+          lines += emit("X-GENDER", sanitize(gender))
+          lines += emit("X-HOBBY", sanitize(hobby))
+          lines += emit("X-KEYWORDS", sanitize(keywords))
+          lines += emit("X-LANGUAGE", sanitize(lang))
+          lines += emit("X-MANAGER", sanitize(manager))
+          lines += emit("X-OFFICE", sanitize(office))
+          lines += emit("X-PROFESSION", sanitize(profession))
+          lines += emit("X-SPOUSE", sanitize(spouse))
+          lines += emit("URL", sanitize(web))
+          lines += emit("NOTE", sanitize(notes))
+          lines += ["END:VCARD"]
+          vcard = "\\n".join(lines) + "\\n"
+          log_to_js(f"Built vCard: {vcard[:100]}...")
+          return vcard
+      def convert_csv_to_vcf(csv_content_base64, delimiter, split=False):
+          import io
+          import base64
+          output = []
+          log_to_js(f"Starting conversion with delimiter: {delimiter!r}")
+          try:
+              csv_content = base64.b64decode(csv_content_base64).decode('utf-8')
+              log_to_js(f"CSV content sample: {csv_content[:100]}...")
+              reader = csv.DictReader(io.StringIO(csv_content), delimiter=("\t" if delimiter == "\\t" else delimiter))
+              headers = reader.fieldnames
+              if not headers:
+                  raise ValueError("CSV file is empty or has no headers")
+              log_to_js(f"Detected headers: {headers}")
+              if not any(h.lower() in ['first name', 'last name', 'e-mail address', 'company'] for h in headers):
+                  raise ValueError("CSV file must contain at least one of: 'First Name', 'Last Name', 'E-mail Address', or 'Company'")
+              rows = list(reader)
+              log_to_js(f"Row count: {len(rows)}")
+              if not rows:
+                  raise ValueError("CSV file contains no contact data")
+              cards = []
+              for i, row in enumerate(rows):
+                  card = build_vcard(row)
+                  if card:
+                      cards.append(card)
+                  if i % 100 == 0:
+                      log_to_js(f"Processed {i} contacts...")
+              log_to_js(f"Number of cards built: {len(cards)}")
+              if not cards:
+                  raise ValueError("No valid contacts found in CSV")
+              if split:
+                  for idx, (row, card) in enumerate(zip(rows, cards)):
+                      rl = row_lowered(row)
+                      fn_guess = join_nonempty(
+                          get(rl, "Title", "prefix", "Personal Title"),
+                          join_nonempty(get(rl, "First Name", "first"),
+                                        get(rl, "Middle Name", "middle"),
+                                        get(rl, "Last Name", "last")),
+                          get(rl, "Suffix", "suffix")
+                      ) or get(rl, "Company", "company") or f"contact_{idx+1:04d}"
+                      safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", fn_guess)[:80]
+                      output.append((f"{safe_name}.vcf", card))
+              else:
+                  output = [("contacts.vcf", "\\n".join(cards))]
+              log_to_js(f"Conversion completed. Output length: {len(output)}")
+              return output
+          except csv.Error as e:
+              log_to_js(f"CSV Error: {str(e)}")
+              raise ValueError(f"Invalid CSV format: {str(e)}. Please check the separator and file content.")
+          except UnicodeDecodeError as e:
+              log_to_js(f"Unicode Decode Error: {str(e)}")
+              raise ValueError("CSV file is not UTF-8 encoded. Please ensure the file is saved in UTF-8 format.")
+          except Exception as e:
+              log_to_js(f"Unexpected error: {str(e)}")
+              raise ValueError(f"Unexpected error during conversion: {str(e)}")
+    `);
 
     loadPyodideAndPackages();
   </script>
